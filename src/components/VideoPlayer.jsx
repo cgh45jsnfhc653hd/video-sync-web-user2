@@ -1,302 +1,129 @@
-// src/components/VideoPlayer.jsx
-import { useEffect, useRef, useState, forwardRef } from 'react';
-import Hls from 'hls.js';
-import { Play, Pause, Volume2, VolumeX, Maximize, SkipBack, SkipForward } from 'lucide-react';
-import { useRealtimeSync } from '../hooks/useRealtimeSync';
+// src/components/FileExplorer.jsx
+import { useState, useEffect } from 'react';
+import { collection, query, onSnapshot, orderBy } from 'firebase/firestore';
+import { firestoreDb } from '../lib/firebase';
+import { Folder, Play, Clock } from 'lucide-react';
 
 const USERNAME = import.meta.env.VITE_USER_NAME || 'User';
+const R2_PUBLIC_URL = import.meta.env.VITE_R2_PUBLIC_URL;
 
-const VideoPlayer = forwardRef(({ onSystemMessage }, ref) => {
-  const videoRef = useRef(null);
-  const hlsRef = useRef(null);
-  const progressRef = useRef(null);
+export default function FileExplorer({ onVideoSelect, onSystemMessage }) {
+  const [folders, setFolders] = useState([]);
+  const [videos, setVideos] = useState([]);
+  const [selectedFolderId, setSelectedFolderId] = useState(null);
+  const [selectedVideo, setSelectedVideo] = useState(null);
 
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
-  const [showControls, setShowControls] = useState(true);
-  const [buffering, setBuffering] = useState(false);
-  const [videoUrl, setVideoUrl] = useState(null);
-
-  // HLS levels (resolutions)
-  const [levels, setLevels] = useState([]);
-  const [currentLevel, setCurrentLevel] = useState(-1); // -1 = Auto
-
-  const { syncState, syncPlay, syncPause, syncSeek, syncVideoChange } = useRealtimeSync();
-
-  // Handle video URL changes
   useEffect(() => {
-    if (!syncState.videoId) return;
-    const newUrl = syncState.videoUrl;
-    if (videoUrl === newUrl) return;
+    const q = query(collection(firestoreDb, 'folders'), orderBy('name', 'asc'));
+    const unsubscribe = onSnapshot(q, snapshot => setFolders(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
+    return () => unsubscribe();
+  }, []);
 
-    setVideoUrl(newUrl);
-    const video = videoRef.current;
-    if (!video) return;
-
-    // Destroy previous HLS
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
-    }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
-      hlsRef.current = hls;
-      hls.loadSource(newUrl);
-      hls.attachMedia(video);
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        // Populate levels
-        setLevels(hls.levels.map((lvl, idx) => ({ height: lvl.height, idx })));
-        setCurrentLevel(hls.currentLevel);
-
-        video.muted = true;
-        video.play()
-          .catch(e => console.log('Auto-play failed:', e))
-          .finally(() => {
-            video.muted = isMuted;
-            if (!syncState.isPlaying) video.pause();
-            setIsPlaying(syncState.isPlaying);
-          });
-      });
-
-      hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
-        setCurrentLevel(data.level);
-      });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = newUrl;
-      if (syncState.isPlaying) video.play().catch(e => console.log('Play failed:', e));
-      else video.pause();
-      setIsPlaying(syncState.isPlaying);
-    }
-
-    // Reset time
-    video.currentTime = 0;
-    setCurrentTime(0);
-  }, [syncState.videoId]);
-
-  // Sync play/pause and seek
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const q = query(collection(firestoreDb, 'videos'), orderBy('title', 'asc'));
+    const unsubscribe = onSnapshot(q, snapshot => setVideos(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
+    return () => unsubscribe();
+  }, []);
 
-    if (Math.abs(video.currentTime - syncState.currentTime) > 0.5) {
-      video.currentTime = syncState.currentTime;
-    }
-
-    if (syncState.isPlaying && video.paused) {
-      video.play().catch(e => console.log('Play failed:', e));
-      setIsPlaying(true);
-    } else if (!syncState.isPlaying && !video.paused) {
-      video.pause();
-      setIsPlaying(false);
-    }
-  }, [syncState.currentTime, syncState.isPlaying]);
-
-  // Video event handlers
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const handleTimeUpdate = () => setCurrentTime(video.currentTime);
-    const handleDurationChange = () => setDuration(video.duration);
-    // Inside VideoPlayer.jsx useEffect for video event handlers
-    const handleWaiting = () => {
-      setBuffering(true);
-      onSystemMessage?.(`${USERNAME} is buffering...`);
-    };
-    const handleCanPlay = () => {
-      setBuffering(false);
-      onSystemMessage?.(`${USERNAME} finished buffering`);
-    };
-
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('durationchange', handleDurationChange);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplay', handleCanPlay);
-
-    return () => {
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-      video.removeEventListener('durationchange', handleDurationChange);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplay', handleCanPlay);
-    };
-  }, [onSystemMessage]);
-
-  // Local play/pause
-  const togglePlayPause = () => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (video.paused) {
-      video.play().then(() => {
-        setIsPlaying(true);
-        syncPlay();
-        onSystemMessage?.(`${USERNAME} played the video`);
-      }).catch(e => console.log('Play failed:', e));
-    } else {
-      video.pause();
-      setIsPlaying(false);
-      syncPause();
-      onSystemMessage?.(`${USERNAME} paused the video`);
-    }
+  const handleVideoSelect = (video) => {
+    const videoUrl = `${R2_PUBLIC_URL}/${video.filename}/master.m3u8`;
+    setSelectedVideo(video.id);
+    onVideoSelect?.(video.id, videoUrl);
+    onSystemMessage?.(`${USERNAME} changed video to "${video.title}"`);
   };
 
-  // Seek
-  const handleSeek = (e) => {
-    const video = videoRef.current;
-    const rect = progressRef.current.getBoundingClientRect();
-    const pos = (e.clientX - rect.left) / rect.width;
-    const newTime = pos * duration;
+  const displayVideos = selectedFolderId
+    ? videos.filter(v => v.folderId === selectedFolderId)
+    : videos.filter(v => !v.folderId);
 
-    video.currentTime = newTime;
-    syncSeek(newTime);
-
-    const direction = newTime > currentTime ? 'forward' : 'backward';
-    const diff = Math.abs(newTime - currentTime).toFixed(0);
-    onSystemMessage?.(`${USERNAME} skipped ${direction} ${diff}s`);
-  };
-
-  // Skip forward/backward
-  const skip = (seconds) => {
-    const video = videoRef.current;
-    const newTime = Math.max(0, Math.min(video.currentTime + seconds, duration));
-    video.currentTime = newTime;
-    syncSeek(newTime);
-
-    const direction = seconds > 0 ? 'forward' : 'backward';
-    onSystemMessage?.(`${USERNAME} skipped ${direction} ${Math.abs(seconds)}s`);
-  };
-
-  // Volume
-  const toggleMute = () => {
-    const video = videoRef.current;
-    video.muted = !isMuted;
-    setIsMuted(!isMuted);
-  };
-
-  const handleVolumeChange = (e) => {
-    const newVolume = parseFloat(e.target.value);
-    const video = videoRef.current;
-    video.volume = newVolume;
-    setVolume(newVolume);
-    setIsMuted(newVolume === 0);
-  };
-
-  // Fullscreen
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      videoRef.current.requestFullscreen();
-    }
-  };
-
-  // Format time
-  const formatTime = (time) => {
-    const mins = Math.floor(time / 60);
-    const secs = Math.floor(time % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  const formatDuration = (seconds) => {
+    if (!seconds) return null;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   };
 
   return (
-    <div
-      className="relative bg-black rounded-lg overflow-hidden"
-      onMouseEnter={() => setShowControls(true)}
-      onMouseLeave={() => setShowControls(false)}
-    >
-      <video
-        ref={videoRef}
-        className="w-full aspect-video"
-        onClick={togglePlayPause}
-        muted={isMuted}
-        loop={true}
-      />
+    <div className="space-y-6">
 
-      {buffering && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-white"></div>
+      {/* Folders */}
+      {folders.length > 0 && (
+        <div>
+          <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
+            <Folder size={20} /> Folders
+          </h3>
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            <button
+              onClick={() => setSelectedFolderId(null)}
+              className={`px-4 py-2 rounded-lg whitespace-nowrap transition ${selectedFolderId === null ? 'bg-red-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            >
+              All Videos
+            </button>
+            {folders.map(folder => {
+              const count = videos.filter(v => v.folderId === folder.id).length;
+              return (
+                <button
+                  key={folder.id}
+                  onClick={() => setSelectedFolderId(folder.id)}
+                  className={`px-4 py-2 rounded-lg whitespace-nowrap transition flex items-center gap-2 ${selectedFolderId === folder.id ? 'bg-red-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                >
+                  <Folder size={16} /> {folder.name} <span className="text-xs opacity-70">({count})</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
-      {/* Controls */}
-      <div
-        className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black to-transparent p-4 transition-opacity ${showControls ? 'opacity-100' : 'opacity-0'}`}
-      >
-        {/* Progress bar */}
-        <div
-          ref={progressRef}
-          className="w-full h-1 bg-gray-600 rounded cursor-pointer mb-2"
-          onClick={handleSeek}
-        >
-          <div
-            className="h-full bg-red-600 rounded"
-            style={{ width: `${(currentTime / duration) * 100}%` }}
-          />
-        </div>
-
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button onClick={togglePlayPause} className="text-white hover:text-gray-300">
-              {isPlaying ? <Pause size={24} /> : <Play size={24} />}
-            </button>
-            <button onClick={() => skip(-10)} className="text-white hover:text-gray-300">
-              <SkipBack size={20} />
-            </button>
-            <button onClick={() => skip(10)} className="text-white hover:text-gray-300">
-              <SkipForward size={20} />
-            </button>
-
-            <div className="flex items-center gap-2">
-              <button onClick={toggleMute} className="text-white hover:text-gray-300">
-                {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-              </button>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.1"
-                value={volume}
-                onChange={handleVolumeChange}
-                className="w-20"
-              />
-            </div>
-
-            <span className="text-white text-sm">
-              {formatTime(currentTime)} / {formatTime(duration)}
-            </span>
-
-            {/* Resolution selector */}
-            {levels.length > 0 && (
-              <select
-                className="bg-gray-700 text-white text-sm p-1 rounded"
-                value={currentLevel}
-                onChange={(e) => {
-                  const lvl = parseInt(e.target.value);
-                  if (hlsRef.current) {
-                    hlsRef.current.currentLevel = lvl;
-                    setCurrentLevel(lvl);
-                  }
-                }}
-              >
-                <option value={-1}>Auto</option>
-                {levels.map(lvl => (
-                  <option key={lvl.idx} value={lvl.idx}>{lvl.height}p</option>
-                ))}
-              </select>
-            )}
+      {/* Videos */}
+      <div>
+        <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
+          <Play size={20} /> {selectedFolderId ? `${folders.find(f => f.id === selectedFolderId)?.name || 'Folder'} Videos` : 'All Videos'}
+          <span className="text-gray-400 text-sm">({displayVideos.length})</span>
+        </h3>
+        {displayVideos.length === 0 ? (
+          <div className="bg-gray-800 rounded-lg p-12 text-center text-gray-400">
+            <Play size={48} className="mx-auto text-gray-600 mb-4" />
+            <p>No videos found</p>
           </div>
-
-          <button onClick={toggleFullscreen} className="text-white hover:text-gray-300">
-            <Maximize size={20} />
-          </button>
-        </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {displayVideos.map(video => (
+              <VideoCard key={video.id} video={video} isSelected={selectedVideo === video.id} onSelect={() => handleVideoSelect(video)} formatDuration={formatDuration} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
-});
+}
 
-export default VideoPlayer;
+function VideoCard({ video, isSelected, onSelect, formatDuration }) {
+  const [imgError, setImgError] = useState(false);
+  const thumbnailUrl = video.thumbnailUrl || `${R2_PUBLIC_URL}/${video.filename}/thumbnail.jpg`;
+
+  return (
+    <div onClick={onSelect} className={`group cursor-pointer rounded-lg overflow-hidden bg-gray-800 transition-all hover:scale-105 hover:shadow-2xl ${isSelected ? 'ring-4 ring-red-600' : ''}`}>
+      <div className="relative aspect-video bg-gray-900">
+        {!imgError ? (
+          <img src={thumbnailUrl} alt={video.title} className="w-full h-full object-cover" onError={() => setImgError(true)} />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-800 to-gray-900">
+            <Play size={48} className="text-gray-600" />
+          </div>
+        )}
+        {video.duration && (
+          <div className="absolute bottom-2 right-2 bg-black bg-opacity-80 px-2 py-1 rounded text-xs text-white flex items-center gap-1">
+            <Clock size={12} /> {formatDuration(video.duration)}
+          </div>
+        )}
+        {isSelected && (
+          <div className="absolute top-2 left-2 bg-red-600 text-white px-2 py-1 rounded text-xs font-semibold">NOW PLAYING</div>
+        )}
+      </div>
+      <div className="p-3">
+        <h4 className="text-white font-medium text-sm line-clamp-2 group-hover:text-red-400 transition">{video.title}</h4>
+      </div>
+    </div>
+  );
+}
